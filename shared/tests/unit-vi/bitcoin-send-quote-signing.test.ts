@@ -44,9 +44,9 @@ function makeMemStorage(): IStorage {
   } as IStorage;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
-  clearWalletCache();
+  await clearWalletCache();
   setMasterSeed(MNEMONIC);
   mockBroadcastV2.mockResolvedValue('ok');
   mockConnectMain.mockResolvedValue(undefined);

@@ -128,6 +128,8 @@ export default defineConfig(({ mode }) => {
           replacement: path.resolve(__dirname, 'src/mainview/modules/expo-fetch-shim.ts'),
         },
         {
+          // SDK 0.5 keeps the expo adapter at dist/adapters/expo.js (verified for 0.5.8).
+          // It re-exports from ../chunk-*.js, which Vite resolves relative to this file.
           find: '@arkade-os/sdk/adapters/expo',
           replacement: path.resolve(__dirname, 'node_modules/@arkade-os/sdk/dist/adapters/expo.js'),
         },
