@@ -6,7 +6,6 @@
       "name": "layerzwallet-desktop",
       "dependencies": {
         "@aptabase/web": "^0.5.0",
-        "@arkade-os/boltz-swap": "0.3.47",
         "@arkade-os/sdk": "0.4.42",
         "@atomiqlabs/chain-evm": "2.4.5",
         "@atomiqlabs/sdk": "8.8.4",
@@ -84,8 +83,6 @@
     "@adraffy/ens-normalize": ["@adraffy/ens-normalize@1.10.1", "", {}, "sha512-96Z2IP3mYmF1Xg2cDm8f1gWGf/HUVedQ3FMifV4kG/PQ4yEP51xDtRAEfhVNt5f/uzpNkZHwWQuUcu6D6K+Ekw=="],
 
     "@aptabase/web": ["@aptabase/web@0.5.0", "", {}, "sha512-+RFdaS0bLJtqTZyB1uG32S7tuTfJTGbG2bkdVMs3AT7yG7DP2yb6JY5rZoBf3UyW9sigFHGRkbXoAXdCMZibWA=="],
-
-    "@arkade-os/boltz-swap": ["@arkade-os/boltz-swap@0.3.47", "", { "dependencies": { "@arkade-os/sdk": "0.4.42", "@noble/curves": "2.0.1", "@noble/hashes": "2.0.1", "@scure/base": "2.0.0", "@scure/btc-signer": "2.0.1", "bip68": "1.0.4", "light-bolt11-decoder": "3.2.0" }, "peerDependencies": { "expo-background-task": ">=0.1.0", "expo-task-manager": ">=3.0.0" }, "optionalPeers": ["expo-background-task", "expo-task-manager"] }, "sha512-Q9BpIhZNLc2MLRua4LhzbhUIQavUtqt4WSVxfr1or7q0gjcqWlZGF5W0ONYJFMq/JWOSUiHsnoiLihvX6Vl7rQ=="],
 
     "@arkade-os/sdk": ["@arkade-os/sdk@0.4.42", "", { "dependencies": { "@bitcoinerlab/descriptors-scure": "3.1.7", "@marcbachmann/cel-js": "7.3.1", "@noble/curves": "2.0.1", "@noble/secp256k1": "3.0.0", "@scure/base": "2.0.0", "@scure/bip39": "2.0.1", "@scure/btc-signer": "2.0.1", "bip68": "1.0.4", "ws-electrumx-client": "1.0.5" }, "peerDependencies": { "@react-native-async-storage/async-storage": ">=1.0.0", "expo": ">=54.0.0", "expo-background-task": "~1.0.10 || >=55.0.0", "expo-sqlite": "~16.0.10 || >=55.0.0", "expo-task-manager": "~14.0.9 || >=55.0.0" }, "optionalPeers": ["@react-native-async-storage/async-storage", "expo", "expo-background-task", "expo-sqlite", "expo-task-manager"] }, "sha512-yv9v4IRGV5n2wQSAocZwn8owwJ7rghcLZd/7F5X8EcaYa4DknWSMa0iRAvT62Nc2k440sk0XILw3Z5wICdYT6w=="],
 
@@ -1311,8 +1308,6 @@
 
     "iterator.prototype": ["iterator.prototype@1.1.5", "", { "dependencies": { "define-data-property": "^1.1.4", "es-object-atoms": "^1.0.0", "get-intrinsic": "^1.2.6", "get-proto": "^1.0.0", "has-symbols": "^1.1.0", "set-function-name": "^2.0.2" } }, "sha512-H0dkQoCa3b2VEeKQBOxFph+JAbcrQdE7KC0UkqwpLmv2EC4P41QXP+rqo9wYodACiG5/WM5s9oDApTU8utwj9g=="],
 
-    "jiti": ["jiti@1.21.7", "", { "bin": { "jiti": "bin/jiti.js" } }, "sha512-/imKNG4EbWNrVjoNC/1H5/9GFy+tqjGBHCaSsN+P2RnPqjsLmv6UD3Ej+Kj8nBWaRAwyk7kK5ZUc+OEatnTR3A=="],
-
     "jose": ["jose@6.2.3", "", {}, "sha512-YYVDInQKFJfR/xa3ojUTl8c2KoTwiL1R5Wg9YCydwH0x0B9grbzlg5HC7mMjCtUJjbQ/YnGEZIhI5tCgfTb4Hw=="],
 
     "js-base64": ["js-base64@3.7.8", "", {}, "sha512-hNngCeKxIUQiEUN3GPJOkz4wF/YvdUdbNL9hsBcMQTkKzboD7T/q3OYOuuPZLUE6dBxSGpwhk5mwuDud7JVAow=="],
@@ -1886,8 +1881,6 @@
     "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
 
     "zone-file": ["zone-file@2.0.0-beta.3", "", {}, "sha512-6tE3PSRcpN5lbTTLlkLez40WkNPc9vw/u1J2j6DBiy0jcVX48nCkWrx2EC+bWHqC2SLp069Xw4AdnYn/qp/W5g=="],
-
-    "@arkade-os/boltz-swap/@noble/hashes": ["@noble/hashes@2.0.1", "", {}, "sha512-XlOlEbQcE9fmuXxrVTXCTlG2nlRXa9Rj3rr5Ue/+tX+nmkgbX720YHh0VR3hBF9xDvwnb8D2shVGOwNx+ulArw=="],
 
     "@arkade-os/sdk/@noble/secp256k1": ["@noble/secp256k1@3.0.0", "", {}, "sha512-NJBaR352KyIvj3t6sgT/+7xrNyF9Xk9QlLSIqUGVUYlsnDTAUqY8LOmwpcgEx4AMJXRITQ5XEVHD+mMaPfr3mg=="],
 

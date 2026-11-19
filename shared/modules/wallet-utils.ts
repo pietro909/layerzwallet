@@ -184,9 +184,7 @@ export async function lazyInitWallet(network: TSupportedLazyInitWalletNetworks, 
       aw.setSecret(masterSeed);
       aw.setAccountNumber(accountNumber);
       aw.setArkServerUrl('https://arkade.computer');
-      aw.setBoltzApiUrl('https://api.ark.boltz.exchange');
       await aw.init(storage);
-      await aw.initLightningSwaps();
       cachedWallets[network][accountNumber] = aw;
       return aw;
     }

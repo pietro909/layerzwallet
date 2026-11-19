@@ -128,7 +128,6 @@ test('ark mainnet can getCommonTransactions', async (context) => {
   const w = new ArkWallet();
   w.setSecret(process.env.TEST_MNEMONIC);
   w.setArkServerUrl('https://arkade.computer');
-  w.setBoltzApiUrl('https://api.ark.boltz.exchange');
   await w.init(storageMock);
 
   const transfers: DeepPartial<ArkTransaction>[] = [

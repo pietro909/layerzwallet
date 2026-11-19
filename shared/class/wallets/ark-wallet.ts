@@ -1,4 +1,3 @@
-import { ArkadeSwaps, BoltzSwapProvider, PendingSwap, decodeInvoice } from '@arkade-os/boltz-swap';
 import { ArkAddress, ArkTransaction, ExtendedCoin, ExtendedVirtualCoin, Ramps, SingleKey, TxType, VtxoManager, Wallet, type WalletBalance } from '@arkade-os/sdk';
 import { ExpoArkProvider, ExpoIndexerProvider } from '@arkade-os/sdk/adapters/expo';
 import ecc from '@bitcoinerlab/secp256k1';
@@ -25,6 +24,12 @@ const bip32 = BIP32Factory(ecc);
 
 const ARK_STORAGE_PREFIX = 'ark-sdk-v2';
 
+/**
+ * Boltz shut down, so Ark Lightning is unavailable until the Arkade 0.5 migration
+ * brings it back (receive via LNURL, send via Arkade swaps).
+ */
+const LIGHTNING_UNAVAILABLE_MESSAGE = 'Lightning on Arkade is temporarily unavailable while the wallet migrates to the new Arkade Lightning backend';
+
 type StoredContract = {
   label?: string;
   type: string;
@@ -46,14 +51,6 @@ type ContractFilter = {
 type WalletState = {
   lastSyncTime?: number;
   settings?: Record<string, any>;
-};
-
-type PendingSwapFilter = {
-  id?: string | string[];
-  status?: PendingSwap['status'] | PendingSwap['status'][];
-  type?: PendingSwap['type'] | PendingSwap['type'][];
-  orderBy?: 'createdAt';
-  orderDirection?: 'asc' | 'desc';
 };
 
 /**
@@ -268,112 +265,6 @@ class LayerzWalletRepository {
 }
 
 /**
- * Minimal swap repository for Ark <-> Lightning swap state.
- *
- * the Boltz swap library needs persistence for in-flight swaps.
- */
-class LayerzSwapRepository {
-  readonly version = 1 as const;
-
-  constructor(private readonly storage: NamespacedStorage) {}
-
-  /**
-   * Save or update a swap in the bucket that matches its type.
-   *
-   * swap records change status over time, so later writes should replace the
-   * earlier version with the same id instead of appending duplicates.
-   */
-  async saveSwap<T extends PendingSwap>(swap: T): Promise<void> {
-    const swaps = await this.readSwaps<T>(swap.type);
-    const index = swaps.findIndex((existingSwap) => existingSwap.id === swap.id);
-
-    if (index === -1) {
-      swaps.push(swap);
-    } else {
-      swaps[index] = swap;
-    }
-
-    await this.writeSwaps(swap.type, swaps);
-  }
-
-  /**
-   * Delete a swap by id without requiring the caller to know its type first.
-   *
-   * many call sites only know the id and should not need extra bookkeeping for
-   * whether the swap was reverse, submarine or chain.
-   */
-  async deleteSwap(id: string): Promise<void> {
-    for (const type of this.allSwapTypes()) {
-      const swaps = await this.readSwaps(type);
-      await this.writeSwaps(
-        type,
-        swaps.filter((swap) => swap.id !== id)
-      );
-    }
-  }
-
-  /**
-   * Recreate the small subset of query behavior the swap SDK expects.
-   *
-   * we replaced a heavier repository implementation with key-value storage, so
-   * this method preserves only the filtering/sorting behavior the wallet uses.
-   */
-  async getAllSwaps<T extends PendingSwap>(filter?: PendingSwapFilter): Promise<T[]> {
-    let swaps: PendingSwap[] = [...(await this.readSwaps('reverse')), ...(await this.readSwaps('submarine')), ...(await this.readSwaps('chain'))];
-
-    if (filter?.id) {
-      const ids = Array.isArray(filter.id) ? filter.id : [filter.id];
-      swaps = swaps.filter((swap) => ids.includes(swap.id));
-    }
-
-    if (filter?.status) {
-      const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
-      swaps = swaps.filter((swap) => statuses.includes(swap.status));
-    }
-
-    if (filter?.type) {
-      const types = Array.isArray(filter.type) ? filter.type : [filter.type];
-      swaps = swaps.filter((swap) => types.includes(swap.type));
-    }
-
-    if (filter?.orderBy === 'createdAt') {
-      swaps.sort((a, b) => a.createdAt - b.createdAt);
-      if (filter.orderDirection !== 'asc') swaps.reverse();
-    }
-
-    return swaps as T[];
-  }
-
-  async clear(): Promise<void> {
-    for (const type of this.allSwapTypes()) {
-      await this.writeSwaps(type, []);
-    }
-  }
-
-  async [Symbol.asyncDispose](): Promise<void> {
-    // no-op
-  }
-
-  /**
-   * Read one swap bucket and discard anything that does not look like a swap.
-   *
-   * bad persisted data should not crash swap recovery or invoice checks.
-   */
-  private async readSwaps<T extends PendingSwap>(type: PendingSwap['type']): Promise<T[]> {
-    const parsed = await this.storage.readJson<PendingSwap[]>(`swaps:${type}`, []);
-    return parsed.filter((swap): swap is T => !!swap && typeof swap === 'object' && 'id' in swap && 'type' in swap);
-  }
-
-  private async writeSwaps(type: PendingSwap['type'], swaps: PendingSwap[]): Promise<void> {
-    await this.storage.writeJson(`swaps:${type}`, swaps);
-  }
-
-  private allSwapTypes(): PendingSwap['type'][] {
-    return ['reverse', 'submarine', 'chain'];
-  }
-}
-
-/**
  * Small contract repository used by the Ark SDK contract manager.
  *
  * Ark Lightning and contract watching rely on persisted contracts, but this
@@ -456,12 +347,9 @@ class LayerzContractRepository {
 
 export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLightningWallet, InterfaceAccountBasedWallet, InterfaceCanHaveTokens {
   private _wallet: Wallet | undefined = undefined;
-  private _arkadeLightning: ArkadeSwaps | undefined = undefined;
   private _arkServerUrl: string = 'https://mutinynet.arkade.sh';
-  private _boltzApiUrl: string = '';
   protected _accountNumber: number = 0;
   private _manager: VtxoManager | undefined = undefined;
-  private _arkStorage: IStorage | undefined = undefined;
   private _arkTokenBalances: CachedTokenInfo[] = [];
   _lastTokensFetch: number = 0;
 
@@ -472,11 +360,6 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
   setArkServerUrl(url: string) {
     assert(!this._wallet, 'Wallet already initialized');
     this._arkServerUrl = url;
-  }
-
-  setBoltzApiUrl(url: string) {
-    assert(!this._arkadeLightning, 'Already initialized');
-    this._boltzApiUrl = url;
   }
 
   _getIdentity() {
@@ -497,9 +380,6 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
   }
 
   async init(layerzStorage: IStorage) {
-    this._arkStorage = layerzStorage;
-    this._arkadeLightning = undefined;
-
     const identity = this._getIdentity();
     const storage = new NamespacedStorage(layerzStorage, this._arkServerUrl, this._accountNumber);
     const walletRepository = new LayerzWalletRepository(storage);
@@ -608,31 +488,9 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
     }
   }
 
-  async initLightningSwaps() {
-    assert(this._wallet, 'Ark wallet must be initialized first');
-    assert(this._arkStorage, 'Ark wallet storage is not initialized');
-    assert(this._boltzApiUrl, 'Boltz Api Url is not set');
-
-    const swapProvider = new BoltzSwapProvider({
-      apiUrl: this._boltzApiUrl,
-      network: this._arkServerUrl.includes('mutiny') ? 'mutinynet' : 'bitcoin',
-    });
-
-    this._arkadeLightning = await ArkadeSwaps.create({
-      wallet: this._wallet,
-      swapProvider,
-      swapRepository: new LayerzSwapRepository(new NamespacedStorage(this._arkStorage, this._arkServerUrl, this._accountNumber)),
-      swapManager: false,
-    });
-  }
-
   async getOffchainBalance() {
     assert(this._wallet, 'Ark wallet not initialized');
     assert(this._manager, 'this._manager is undefined');
-
-    if (this._arkadeLightning) {
-      await this._attemptToClaimPendingVHTLCs();
-    }
 
     // renew VTXO:
     try {
@@ -727,28 +585,6 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
     });
   }
 
-  async _attemptToClaimPendingVHTLCs() {
-    assert(this._wallet, 'Ark wallet not initialized');
-    assert(this._arkadeLightning, 'Ark Lightning not initialized');
-
-    const arkadeLightning = this._arkadeLightning;
-    const pendingReverseSwaps = await arkadeLightning.getPendingReverseSwaps();
-    if ((pendingReverseSwaps ?? []).length > 0) console.log('got', pendingReverseSwaps?.length ?? [], 'pending swaps');
-
-    await Promise.allSettled(
-      (pendingReverseSwaps ?? []).map(async (swap) => {
-        console.log(`claiming ${swap.id}...`);
-        try {
-          await arkadeLightning.claimVHTLC(swap);
-          console.log(`${swap.id} claimed!`);
-        } catch (error: any) {
-          globalThis.handleError?.(error, 'ark-wallet.ts');
-          console.log(`could not claim ${swap.id}:`, error?.message ?? error);
-        }
-      })
-    );
-  }
-
   async pay(address: string, amount: number): Promise<string> {
     if (!this._wallet) throw new Error('Ark wallet not initialized');
 
@@ -810,25 +646,8 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
     return commonTransactions;
   }
 
-  async createLightningInvoice(amountSats: number, memo: string): Promise<createLightningInvoiceResponse> {
-    assert(this._arkadeLightning, 'Ark Lightning not initialized');
-    assert(amountSats > 333, 'Only invoices > 333 sat allowed');
-
-    const result = await this._arkadeLightning.createLightningInvoice({
-      amount: amountSats,
-      description: memo,
-    });
-
-    console.log('Expiry (seconds):', result.expiry);
-    console.log('Lightning Invoice:', result.invoice);
-    console.log('Payment Hash:', result.paymentHash);
-    console.log('Pending swap', result.pendingSwap);
-    console.log('Preimage', result.preimage);
-
-    return {
-      invoice: result.invoice,
-      serviceFeeSat: 1, // FIXME: hardcoded till Ark sdk provides actual number
-    };
+  async createLightningInvoice(_amountSats: number, _memo: string): Promise<createLightningInvoiceResponse> {
+    throw new Error(LIGHTNING_UNAVAILABLE_MESSAGE);
   }
 
   fetchLightningLimits(): Promise<LightningPaymentLimitsResponse> {
@@ -847,50 +666,21 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
     });
   }
 
-  async isInvoicePaid(invoice: string): Promise<boolean> {
-    const { paymentHash } = decodeInvoice(invoice);
-    if (!paymentHash) throw new Error('Payment hash not found in invoice');
-    return this.isInvoicePaidByHash(paymentHash);
+  async isInvoicePaid(_invoice: string): Promise<boolean> {
+    throw new Error(LIGHTNING_UNAVAILABLE_MESSAGE);
   }
 
-  async isInvoicePaidByHash(preimageHash: string): Promise<boolean> {
-    assert(this._arkadeLightning, 'Ark Lightning not initialized');
-    if (!preimageHash) throw new Error('No preimage hash provided');
-
-    await this._attemptToClaimPendingVHTLCs();
-
-    const target = preimageHash.toLowerCase();
-    for (const swap of (await this._arkadeLightning.getSwapHistory()) ?? []) {
-      if (swap.status !== 'invoice.settled' || swap.type !== 'reverse') continue;
-      try {
-        const { paymentHash } = decodeInvoice(swap.response.invoice);
-        if (paymentHash?.toLowerCase() === target) return true;
-      } catch {
-        // ignore malformed persisted invoices, dont let one bad record break the lookup
-      }
-    }
-    return false;
+  async isInvoicePaidByHash(_preimageHash: string): Promise<boolean> {
+    throw new Error(LIGHTNING_UNAVAILABLE_MESSAGE);
   }
 
-  async payLightningInvoice(invoice: string): Promise<boolean> {
-    assert(this._arkadeLightning, 'Ark Lightning not initialized');
-    const invoiceDetails = decodeInvoice(invoice);
-
-    console.log('Invoice amount:', invoiceDetails.amountSats, 'sats');
-    console.log('Description:', invoiceDetails.description);
-    console.log('Payment Hash:', invoiceDetails.paymentHash);
-
-    const paymentResult = await this._arkadeLightning.sendLightningPayment({ invoice });
-
-    console.log('Payment successful!');
-    console.log('Amount:', paymentResult.amount);
-    console.log('Preimage:', paymentResult.preimage);
-    console.log('Transaction ID:', paymentResult.txid);
-    return true;
+  async payLightningInvoice(_invoice: string): Promise<boolean> {
+    throw new Error(LIGHTNING_UNAVAILABLE_MESSAGE);
   }
 
   allowLightning() {
-    return !!this._arkadeLightning;
+    // Lightning on Arkade returns with the Arkade 0.5 migration
+    return false;
   }
 
   async getOnchainDepositAddress(): Promise<string> {
