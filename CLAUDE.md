@@ -177,7 +177,7 @@ Each Layer2 follows a specific pattern:
 **ARK (Account-based, Lightning-capable)**
 - Uses @arkade-os/sdk with custom storage adapter
 - Single identity derived from `m/86'/0'/{account}'/0/0`
-- Supports boarding (deposit), transfers, Lightning swaps via Boltz
+- Supports boarding (deposit) and transfers
 - VTXO management with auto-renewal
 - Two implementations: mainnet (arkade.computer) and testnet (mutinynet)
 

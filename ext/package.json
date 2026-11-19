@@ -21,7 +21,6 @@
     "prepare": "cd .. && husky ext/.husky"
   },
   "dependencies": {
-    "@arkade-os/boltz-swap": "0.3.47",
     "@arkade-os/sdk": "0.4.42",
     "@atomiqlabs/chain-evm": "2.4.5",
     "@atomiqlabs/sdk": "8.8.4",

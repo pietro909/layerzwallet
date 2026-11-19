@@ -18,7 +18,6 @@ function getDependencyVersion(packageJson: { dependencies?: Record<string, strin
 const SYNCED_DEPENDENCIES = [
   '@buildonspark/spark-sdk',
   '@arkade-os/sdk',
-  '@arkade-os/boltz-swap',
   '@atomiqlabs/sdk',
   '@atomiqlabs/chain-evm',
   '@breeztech/breez-sdk-liquid', // @breeztech/breez-sdk-liquid-react-native is mobile-only

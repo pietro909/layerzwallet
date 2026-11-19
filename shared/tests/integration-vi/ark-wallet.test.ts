@@ -48,7 +48,6 @@ test('ark mainnet can check balance', async (context) => {
   const w = new ArkWallet();
   w.setSecret(process.env.TEST_MNEMONIC);
   w.setArkServerUrl('https://arkade.computer');
-  w.setBoltzApiUrl('https://api.ark.boltz.exchange');
   await w.init(storageMock);
 
   const offchainBalance = await w.getOffchainBalance();
@@ -67,12 +66,9 @@ test.skip('ark mainnet can check if our invoice is paid', async (context) => {
   const w = new ArkWallet();
   w.setSecret(process.env.TEST_MNEMONIC);
   w.setArkServerUrl('https://arkade.computer');
-  w.setBoltzApiUrl('https://api.ark.boltz.exchange');
   await w.init(storageMock);
 
   // TODO: put data in storage
-
-  await w.initLightningSwaps();
 
   const isPaid = await w.isInvoicePaid(
     'lnbc5u1p5ddkvzpp5edvmfczyxgd0j2t4xkg7raye4l5c0cfknya3jtmpsuy0hvvzm8dsdqsgaf57nfqfaxy7nz0cqz95xqyp2xqsp5farygz7rdact335vzuvrfywz9rpnqp7pnlugf2dj3whxy70degeq9qxpqysgq6gpcaggx43hpyr7gr8wlh52q6qphntnpyuk9xx5c9mrhmlgh48c4dcyrn2ufmr6peux6ncr2ky2ftas2yav8l8e5zzrpgjj4zpg8fqqqqhpvp8'
@@ -91,7 +87,6 @@ test('ark mainnet switch accounts', async (context) => {
   const w = new ArkWallet();
   w.setSecret(process.env.TEST_MNEMONIC);
   w.setArkServerUrl('https://arkade.computer');
-  w.setBoltzApiUrl('https://api.ark.boltz.exchange');
   await w.init(storageMock);
 
   //
@@ -120,10 +115,8 @@ test.skip('ark mainnet can create lightning invoice', async (context) => {
   const w = new ArkWallet();
   w.setSecret(process.env.TEST_MNEMONIC);
   w.setArkServerUrl('https://arkade.computer');
-  w.setBoltzApiUrl('https://api.ark.boltz.exchange');
 
   await w.init(storageMock);
-  await w.initLightningSwaps();
 
   const offchainBalance = await w.getOffchainBalance();
   console.log({ offchainBalance });
@@ -141,13 +134,7 @@ test.skip('ark mainnet can pay lightning invoice', async (context) => {
   const w = new ArkWallet();
   w.setSecret(process.env.TEST_MNEMONIC);
   w.setArkServerUrl('https://arkade.computer');
-  w.setBoltzApiUrl('https://api.ark.boltz.exchange');
   await w.init(storageMock);
-
-  const start = Date.now();
-  await w.initLightningSwaps();
-  const end = Date.now();
-  console.log((end - start) / 1000, 'sec');
 
   const offchainBalance = await w.getOffchainBalance();
   console.log({ offchainBalance });

@@ -1,5 +1,4 @@
 import { SO_LIQUID_USDT, SO_STACKS_STX, SwapOptions, SwapPair, SwapPlatform, SwapProvider } from '../types/swap';
-import { SwapProviderBoltz } from './swap-provider-boltz';
 import { SwapProviderOnramper } from './swap-provider-onramper';
 import { SwapProviderSideshift } from './swap-provider-sideshift';
 import { SwapProviderGardenFinance } from './swap-provider-gardenfinance';
@@ -7,14 +6,7 @@ import { SwapProviderXArk } from './swap-provider-xark';
 import { capitalizeFirstLetter } from '@shared/modules/string-utils';
 import { SwapProviderSymbiosis } from './swap-provider-symbiosis';
 
-const swapPartnersList: SwapProvider[] = [
-  new SwapProviderSymbiosis(),
-  new SwapProviderOnramper(),
-  new SwapProviderSideshift(),
-  new SwapProviderBoltz(),
-  new SwapProviderGardenFinance(),
-  new SwapProviderXArk(),
-];
+const swapPartnersList: SwapProvider[] = [new SwapProviderSymbiosis(), new SwapProviderOnramper(), new SwapProviderSideshift(), new SwapProviderGardenFinance(), new SwapProviderXArk()];
 
 /**
  * @returns list of swap providers that can swap FROM provided network (to smth else)
