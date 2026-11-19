@@ -8,6 +8,7 @@ import {
   TxType,
   Wallet,
   assertPageRequest,
+  contractHandlers,
   pageResult,
   type Contract,
   type ContractFilter,
@@ -78,11 +79,12 @@ type WalletState = {
 
 type ContractWatchState = 'watched' | 'awaiting-funds' | 'retained';
 
-/** 0.5.8 handler defaults: only `boarding` declares a defaultScope (onchain). */
-const DEFAULT_CONTRACT_SCOPES: Record<string, ContractScope> = { boarding: 'onchain' };
-
+// The SDK does not export its own `watchStateOf` / `scopeOf`, but it does export the
+// `contractHandlers` registry they read. Deriving the defaults from that registry (instead of
+// mirroring its contents here) keeps our filters in lockstep with the SDK across version bumps:
+// a handler that gains a `defaultScope` is picked up without a code change on our side.
 const watchStateOf = (contract: Pick<Contract, 'watch'>): ContractWatchState => contract.watch ?? 'watched';
-const scopeOf = (contract: Pick<Contract, 'type' | 'scope'>): ContractScope => contract.scope ?? DEFAULT_CONTRACT_SCOPES[contract.type] ?? 'offchain';
+const scopeOf = (contract: Pick<Contract, 'type' | 'scope'>): ContractScope => contract.scope ?? contractHandlers.get(contract.type)?.defaultScope ?? 'offchain';
 
 const contractFilterMatchesNothing = (filter?: ContractFilter): boolean =>
   [filter?.script, filter?.state, filter?.type, filter?.watch, filter?.scope].some((value) => Array.isArray(value) && value.length === 0);
@@ -246,14 +248,23 @@ class NamespacedStorage {
 class LayerzWalletRepository implements WalletRepository {
   readonly version = 2 as const;
 
+  /**
+   * The tracked-address list is a read-modify-write over one JSON blob; serialize its writes so
+   * concurrent saves (SDK syncs vtxos, utxos and txs at once) cannot drop each other's address,
+   * which would leave a bucket that `clear()` and the 0.5 upgrade wipe then miss.
+   */
+  private addressListQueue: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly storage: NamespacedStorage) {}
 
   /** Clear all cached SDK wallet state for this Ark wallet only. */
   async clear(): Promise<void> {
-    const addresses = await this.getTrackedAddresses();
+    const addresses = await this.storage.readTrackedAddresses();
     await Promise.all(addresses.flatMap((address) => [this.storage.writeVtxos(address, []), this.storage.writeUtxos(address, []), this.storage.writeTransactions(address, [])]));
-    await this.storage.writeJson('wallet:addresses', []);
     await this.storage.writeJson('wallet:state', null);
+    // Routed through the queue so a save that started concurrently cannot re-track an address
+    // into a wallet whose buckets clear() has already emptied.
+    await this.mutate(async () => this.storage.writeJson('wallet:addresses', []));
   }
 
   async getVtxosPage(address: string, page: PageRequest<Outpoint>): Promise<PageResult<ExtendedVirtualCoin, Outpoint>> {
@@ -333,14 +344,18 @@ class LayerzWalletRepository implements WalletRepository {
     // no-op
   }
 
-  private async getTrackedAddresses(): Promise<string[]> {
-    return this.storage.readTrackedAddresses();
+  private async trackAddress(address: string): Promise<void> {
+    await this.mutate(async () => {
+      const addresses = await this.storage.readTrackedAddresses();
+      if (addresses.includes(address)) return;
+      await this.storage.writeJson('wallet:addresses', [...addresses, address]);
+    });
   }
 
-  private async trackAddress(address: string): Promise<void> {
-    const addresses = await this.getTrackedAddresses();
-    if (addresses.includes(address)) return;
-    await this.storage.writeJson('wallet:addresses', [...addresses, address]);
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.addressListQueue.then(operation);
+    this.addressListQueue = run.catch(() => undefined);
+    return run;
   }
 }
 
@@ -772,7 +787,7 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
       const txDetails = txs1[tx.key.boardingTxid];
       const timestamp = tx.createdAt || new Date().getTime();
       const confirmations = txDetails.confirmations ?? 0;
-      const claimable = confirmations >= 1; // can be claimed once it's unconfirmed
+      const claimable = confirmations >= 1; // claimable once the deposit confirms
       return {
         network,
         id: tx.key.boardingTxid,
@@ -821,9 +836,11 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
       // The SDK's VtxoManager auto-settles boarding UTXOs in the background. If it won the
       // race with this manual claim, report the settled deposit instead of asking
       // Ramps.onboard() to settle an empty input set (which would fail on fees >= value).
+      // When the deposit is merely not yet visible to the indexer, neither branch fires and
+      // the caller sees a retryable message rather than an SDK internals error.
       const settled = await this.getSettledBoardingAmount(txid);
       if (settled) return settled;
-      throw new Error('Boarding deposit is no longer claimable; it may have been settled automatically');
+      throw new Error('Boarding deposit is not claimable right now: it may already have been settled automatically, or the indexer has not caught up yet. Try again shortly.');
     }
 
     const { fees } = await this._wallet.arkProvider.getInfo();

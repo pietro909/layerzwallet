@@ -3,6 +3,7 @@ import { beforeEach, test, vi } from 'vitest';
 import {
   MAX_PAGE_SIZE,
   collectVtxos,
+  contractHandlers,
   type ArkTransaction,
   type Contract,
   type ContractRepository,
@@ -276,6 +277,29 @@ test('concurrent contract saves do not drop each other', async () => {
   await Promise.all(['a', 'b', 'c', 'd'].map((suffix) => contractRepo.saveContract(contract(`script-${suffix}`))));
   const all = await contractRepo.getContractsPage(undefined, { limit: 10 });
   assert.deepEqual(all.items.map((c) => c.script).sort(), ['script-a', 'script-b', 'script-c', 'script-d']);
+});
+
+test('concurrent saves track every address (no dropped buckets for clear() and the upgrade wipe)', async () => {
+  const { walletRepo, cache, namespace } = await makeHarness();
+  await Promise.all(['ark1', 'ark2', 'ark3', 'ark4'].map((address) => walletRepo.saveVtxos(address, [vtxo('a'.repeat(64), 0)])));
+
+  // every address made it into the tracked list, even though the SDK saves
+  // vtxos, utxos and txs concurrently at sync time
+  const tracked: string[] = JSON.parse(cache[`${namespace}:wallet:addresses`]);
+  assert.deepEqual(tracked.sort(), ['ark1', 'ark2', 'ark3', 'ark4']);
+});
+
+test('scope defaults follow the SDK handler registry (canary on SDK bumps)', () => {
+  // Layerz's scopeOf derives absent scopes from the exported contractHandlers registry, so the
+  // filter cannot silently disagree with the SDK. This canary pins 0.5.8's inventory: only
+  // `boarding` is onchain-scoped by default. If a version bump changes it, re-read the
+  // changelog before merging — migrateLegacyUtxos only copies UTXOs for onchain-scoped types.
+  const scopes: Record<string, string> = {};
+  for (const type of contractHandlers.getRegisteredTypes()) {
+    const defaultScope = contractHandlers.get(type)?.defaultScope;
+    if (defaultScope !== undefined) scopes[type] = defaultScope;
+  }
+  assert.deepEqual(scopes, { boarding: 'onchain' });
 });
 
 test('legacy 0.4 UTXO rows (intentTapLeafScript) are still served by getUtxosPage', async () => {

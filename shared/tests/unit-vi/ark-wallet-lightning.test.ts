@@ -86,3 +86,27 @@ test('init and a balance read leave stored Boltz swap rows byte-identical', asyn
     assert.strictEqual(cache[key], value, `${key} must stay untouched for the step 6 refund`);
   }
 });
+
+test('getOffchainBalance returns available + recoverable, not available alone (decision 6)', async () => {
+  walletCreateMock.mockResolvedValue({
+    ...walletStub,
+    getBalance: vi.fn().mockResolvedValue({ available: 40, recoverable: 2, assets: [] }),
+  });
+
+  const cache: Record<string, string> = {};
+  const storage: IStorage = {
+    async setItem(key: string, value: string) {
+      cache[key] = value;
+    },
+    async getItem(key: string) {
+      return cache[key];
+    },
+  };
+
+  const w = new ArkWallet();
+  w.setSecret(TEST_MNEMONIC);
+  await w.init(storage);
+
+  // 40 available + 2 recoverable; a regression to `balance.available` returns 40 and fails here
+  assert.strictEqual(await w.getOffchainBalance(), 42);
+});
