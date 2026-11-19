@@ -172,6 +172,7 @@ export async function lazyInitWallet(network: TSupportedLazyInitWalletNetworks, 
       const aw = new ArkWallet();
       aw.setSecret(masterSeed);
       aw.setAccountNumber(accountNumber);
+      aw.setArkadeNetwork(NETWORK_ARK_MUTINYNET);
 
       await aw.init(storage);
       cachedWallets[network][accountNumber] = aw;
@@ -183,7 +184,7 @@ export async function lazyInitWallet(network: TSupportedLazyInitWalletNetworks, 
       const aw = new ArkWallet();
       aw.setSecret(masterSeed);
       aw.setAccountNumber(accountNumber);
-      aw.setArkServerUrl('https://arkade.computer');
+      aw.setArkadeNetwork(NETWORK_ARK);
       await aw.init(storage);
       cachedWallets[network][accountNumber] = aw;
       return aw;
@@ -279,10 +280,19 @@ export const sanitizeAndValidateMnemonic = (mnemonic: string): string => {
   return sanitizedMnemonic;
 };
 
-export const clearWalletCache = () => {
+/**
+ * Drop the wallet cache, stopping each Ark wallet's SDK settle poll and watchers first.
+ * Awaited so a fresh init() never races the previous instance's `dispose()`.
+ */
+export const clearWalletCache = async (): Promise<void> => {
+  const arkWallets: ArkWallet[] = [];
   (Object.keys(cachedWallets) as TSupportedLazyInitWalletNetworks[]).forEach((network) => {
+    Object.values(cachedWallets[network]).forEach((wallet) => {
+      if (wallet instanceof ArkWallet) arkWallets.push(wallet);
+    });
     cachedWallets[network] = {};
   });
+  await Promise.all(arkWallets.map((wallet) => wallet.dispose()));
 };
 
 /**

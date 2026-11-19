@@ -21,18 +21,12 @@ vi.mock('@arkade-os/sdk', async (importOriginal) => {
 
 const TEST_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 
-const managerStub = {
-  getExpiringVtxos: vi.fn().mockResolvedValue([]),
-  renewVtxos: vi.fn(),
-};
-
 const walletStub = {
-  getVtxoManager: vi.fn().mockResolvedValue(managerStub),
+  dispose: vi.fn().mockResolvedValue(undefined),
   restore: vi.fn().mockResolvedValue(undefined),
   clearSyncCursor: vi.fn().mockResolvedValue(undefined),
-  arkProvider: { getInfo: vi.fn().mockResolvedValue({}) },
   getContractManager: vi.fn().mockResolvedValue({ getContracts: vi.fn().mockResolvedValue([]) }),
-  getBalance: vi.fn().mockResolvedValue({ available: 42, assets: [] }),
+  getBalance: vi.fn().mockResolvedValue({ available: 42, recoverable: 0, assets: [] }),
   assetManager: { getAssetDetails: vi.fn() },
 };
 
@@ -78,11 +72,13 @@ test('init and a balance read leave stored Boltz swap rows byte-identical', asyn
   w.setSecret(TEST_MNEMONIC);
   await w.init(storage);
 
-  // the SDK is wired without any swap repository
+  // the SDK is wired without any swap repository, with the 0.5 provider name
   const config = walletCreateMock.mock.calls[0][0];
   assert.ok(config.storage.walletRepository);
   assert.ok(config.storage.contractRepository);
   assert.ok(!('swapRepository' in config.storage));
+  assert.ok(config.operatorProvider);
+  assert.ok(!config.arkProvider);
 
   assert.strictEqual(await w.getOffchainBalance(), 42);
 

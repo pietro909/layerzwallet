@@ -189,7 +189,7 @@ export const BackgroundExtensionExecutor: Pick<IBackgroundCaller, TMethods> = {
   },
 
   async clear() {
-    clearWalletCache();
+    await clearWalletCache();
   },
 };
 
