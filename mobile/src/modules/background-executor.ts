@@ -300,6 +300,6 @@ export const BackgroundExecutor: IBackgroundCaller = {
   },
 
   async clear() {
-    clearWalletCache();
+    await clearWalletCache();
   },
 };

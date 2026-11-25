@@ -175,11 +175,13 @@ Each Layer2 follows a specific pattern:
 - Hardcoded to account 0 (SDK limitation)
 
 **ARK (Account-based, Lightning-capable)**
-- Uses @arkade-os/sdk with custom storage adapter
+- Uses @arkade-os/sdk 0.5.x with Layerz's own IStorage-backed repositories (`WalletRepository` v2 / `ContractRepository` v4); keep the `ark-sdk-v2:<sha256(serverUrl)[:16]>:account_N` namespace and keys
 - Single identity derived from `m/86'/0'/{account}'/0/0`
-- Supports boarding (deposit) and transfers
-- VTXO management with auto-renewal
+- Supports boarding (deposit) and transfers; the SDK's VtxoManager handles renewal, boarding auto-settle and deprecated-signer migration
+- Balance is `available + recoverable`; boarding is excluded
+- Network endpoints come from `ARKADE_NETWORK_CONFIG` (mainnet `arkade.computer`, mutinynet), never URL sniffing
 - Two implementations: mainnet (arkade.computer) and testnet (mutinynet)
+- Lightning on Ark is temporarily unavailable until steps 3-4 of the 0.5 migration (LNURL receive / Arkade swap send); the wallet methods throw a clear message and `allowLightning()` is false
 
 **Spark (Account-based, Lightning-capable, Token-capable)**
 - Extends `ArkWallet` architecture

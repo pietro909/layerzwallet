@@ -1,5 +1,28 @@
-import { ArkAddress, ArkTransaction, ExtendedCoin, ExtendedVirtualCoin, Ramps, SingleKey, TxType, VtxoManager, Wallet, type WalletBalance } from '@arkade-os/sdk';
-import { ExpoArkProvider, ExpoIndexerProvider } from '@arkade-os/sdk/adapters/expo';
+import {
+  ArkAddress,
+  ArkTransaction,
+  ExtendedCoin,
+  ExtendedVirtualCoin,
+  Ramps,
+  SingleKey,
+  TxType,
+  Wallet,
+  assertPageRequest,
+  contractHandlers,
+  pageResult,
+  type Contract,
+  type ContractFilter,
+  type ContractRepository,
+  type ContractScope,
+  type Outpoint,
+  type PageRequest,
+  type PageResult,
+  type TransactionHistoryPageCursor,
+  type TransactionHistoryPageFilter,
+  type WalletBalance,
+  type WalletRepository,
+} from '@arkade-os/sdk';
+import { ExpoIndexerProvider, ExpoOperatorProvider } from '@arkade-os/sdk/adapters/expo';
 import ecc from '@bitcoinerlab/secp256k1';
 import { sha256 } from '@noble/hashes/sha256';
 import { bytesToHex } from '@noble/hashes/utils';
@@ -30,28 +53,78 @@ const ARK_STORAGE_PREFIX = 'ark-sdk-v2';
  */
 const LIGHTNING_UNAVAILABLE_MESSAGE = 'Lightning on Arkade is temporarily unavailable while the wallet migrates to the new Arkade Lightning backend';
 
-type StoredContract = {
-  label?: string;
-  type: string;
-  params: Record<string, string>;
-  script: string;
-  address: string;
-  state: 'active' | 'inactive';
-  createdAt: number;
-  expiresAt?: number;
-  metadata?: Record<string, unknown>;
+type ArkadeNetwork = typeof NETWORK_ARK | typeof NETWORK_ARK_MUTINYNET;
+
+/** serverUrl keys the storage namespace (sha256) — changing it orphans persisted state. */
+const ARKADE_NETWORK_CONFIG: Record<ArkadeNetwork, { serverUrl: string }> = {
+  [NETWORK_ARK]: { serverUrl: 'https://arkade.computer' },
+  [NETWORK_ARK_MUTINYNET]: { serverUrl: 'https://mutinynet.arkade.sh' },
 };
 
-type ContractFilter = {
-  script?: string | string[];
-  state?: StoredContract['state'] | StoredContract['state'][];
-  type?: string | string[];
-};
+/** Set once restore() has succeeded in this namespace; gates the boot-time full restore. */
+const BOOTSTRAP_FLAG = 'bootstrap:restoredV1';
 
+/**
+ * 0.4 caches carry `virtualStatus` rows that read back as "not swept" under 0.5. Wipe the
+ * VTXO cache once and clear the sync cursor so the SDK re-fetches canonical facts. The legacy
+ * UTXO rows are deliberately kept: `migrateLegacyUtxos` copies them into VTXO rows on boot.
+ */
+const SDK05_UPGRADE_FLAG = 'upgrade:sdk05V1';
+
+/** `WalletState` and `ContractWatchState` are internal to the SDK, so we mirror them here. */
 type WalletState = {
-  lastSyncTime?: number;
   settings?: Record<string, any>;
+  lastSyncTime?: number;
 };
+
+type ContractWatchState = 'watched' | 'awaiting-funds' | 'retained';
+
+// The SDK does not export its own `watchStateOf` / `scopeOf`, but it does export the
+// `contractHandlers` registry they read. Deriving the defaults from that registry (instead of
+// mirroring its contents here) keeps our filters in lockstep with the SDK across version bumps:
+// a handler that gains a `defaultScope` is picked up without a code change on our side.
+const watchStateOf = (contract: Pick<Contract, 'watch'>): ContractWatchState => contract.watch ?? 'watched';
+const scopeOf = (contract: Pick<Contract, 'type' | 'scope'>): ContractScope => contract.scope ?? contractHandlers.get(contract.type)?.defaultScope ?? 'offchain';
+
+const contractFilterMatchesNothing = (filter?: ContractFilter): boolean =>
+  [filter?.script, filter?.state, filter?.type, filter?.watch, filter?.scope].some((value) => Array.isArray(value) && value.length === 0);
+
+const matches = <T>(value: T, criterion?: T | T[]): boolean => {
+  if (criterion === undefined) return true;
+  return Array.isArray(criterion) ? criterion.includes(value) : value === criterion;
+};
+
+const compareOutpoints = (a: Outpoint, b: Outpoint): number => (a.txid < b.txid ? -1 : a.txid > b.txid ? 1 : a.vout - b.vout);
+
+const compareTxKeys = (a: TransactionHistoryPageCursor['key'], b: TransactionHistoryPageCursor['key']): number => {
+  for (const field of ['boardingTxid', 'commitmentTxid', 'arkTxid'] as const) {
+    if (a[field] < b[field]) return -1;
+    if (a[field] > b[field]) return 1;
+  }
+  return 0;
+};
+
+const compareHistoryCursors = (a: TransactionHistoryPageCursor, b: TransactionHistoryPageCursor): number => a.createdAt - b.createdAt || compareTxKeys(a.key, b.key);
+
+const assertHistoryPageFilter = (filter: TransactionHistoryPageFilter): void => {
+  if (filter.since !== undefined && (!Number.isSafeInteger(filter.since) || filter.since < 0)) {
+    throw new RangeError('history since must be non-negative Unix milliseconds');
+  }
+};
+
+/** Copied from the SDK's in-memory repository: sort by outpoint, `after` exclusive, bounded result. */
+const pageOutpoints = <Item extends Outpoint>(rows: Item[], page: PageRequest<Outpoint>): PageResult<Item, Outpoint> => {
+  assertPageRequest(page);
+  const selected = rows
+    .filter((row) => page.after === undefined || compareOutpoints(row, page.after) > 0)
+    .sort(compareOutpoints)
+    .slice(0, page.limit + 1);
+  return pageResult(selected, page.limit, ({ txid, vout }) => ({ txid, vout }));
+};
+
+/** Both saveUtxos call shapes, as `[address, utxos]` entries. */
+const utxoEntries = (addressOrBatch: string | ReadonlyMap<string, ExtendedCoin[]>, utxos: ExtendedCoin[] = []): [string, ExtendedCoin[]][] =>
+  typeof addressOrBatch === 'string' ? [[addressOrBatch, utxos]] : [...addressOrBatch];
 
 /**
  * Merge persisted and freshly fetched SDK records without creating duplicates.
@@ -109,8 +182,16 @@ class NamespacedStorage {
     await this.storage.setItem(this.key(suffix), JSON.stringify(value));
   }
 
-  async clearCoinCacheForAddresses(addresses: string[]): Promise<void> {
-    await Promise.all(addresses.flatMap((address) => [this.storage.setItem(this.key(`wallet:vtxos:${address}`), '[]'), this.storage.setItem(this.key(`wallet:utxos:${address}`), '[]')]));
+  async readTrackedAddresses(): Promise<string[]> {
+    return this.readJson<string[]>('wallet:addresses', []);
+  }
+
+  /**
+   * Wipe only the VTXO buckets. The legacy UTXO rows must survive until the SDK's
+   * `migrateLegacyUtxos` has copied them into VTXO rows (0.5 stores boarding coins there).
+   */
+  async clearVtxoCacheForAddresses(addresses: string[]): Promise<void> {
+    await Promise.all(addresses.map((address) => this.storage.setItem(this.key(`wallet:vtxos:${address}`), '[]')));
   }
 
   async readVtxos(address: string): Promise<ExtendedVirtualCoin[]> {
@@ -160,36 +241,38 @@ class NamespacedStorage {
 }
 
 /**
- * Minimal wallet repository implementation expected by the Ark SDK.
- *
- * the SDK wants repository objects, while this app stores data in a simpler
- * key-value backend. This class bridges that mismatch just enough for the SDK
- * to persist new wallet state going forward.
+ * WalletRepository v2 over Layerz's IStorage. Mirrors the SDK's InMemoryWalletRepository,
+ * with paged reads, the `saveUtxos(Map)` overload and the same namespace/keys as 0.4.
+ * The optional script-based VTXO methods are omitted: the SDK falls back to address buckets.
  */
-class LayerzWalletRepository {
-  readonly version = 1 as const;
+class LayerzWalletRepository implements WalletRepository {
+  readonly version = 2 as const;
+
+  /**
+   * The tracked-address list is a read-modify-write over one JSON blob; serialize its writes so
+   * concurrent saves (SDK syncs vtxos, utxos and txs at once) cannot drop each other's address,
+   * which would leave a bucket that `clear()` and the 0.5 upgrade wipe then miss.
+   */
+  private addressListQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly storage: NamespacedStorage) {}
 
-  /**
-   * Clear all cached SDK wallet state for this Ark wallet only.
-   *
-   * a reset should wipe just this account/server combination, not unrelated
-   * wallets stored elsewhere in the app.
-   */
+  /** Clear all cached SDK wallet state for this Ark wallet only. */
   async clear(): Promise<void> {
-    const addresses = await this.getTrackedAddresses();
+    const addresses = await this.storage.readTrackedAddresses();
     await Promise.all(addresses.flatMap((address) => [this.storage.writeVtxos(address, []), this.storage.writeUtxos(address, []), this.storage.writeTransactions(address, [])]));
-    await this.storage.writeJson('wallet:addresses', []);
     await this.storage.writeJson('wallet:state', null);
+    // Routed through the queue so a save that started concurrently cannot re-track an address
+    // into a wallet whose buckets clear() has already emptied.
+    await this.mutate(async () => this.storage.writeJson('wallet:addresses', []));
   }
 
-  async getVtxos(address: string): Promise<ExtendedVirtualCoin[]> {
-    return this.storage.readVtxos(address);
+  async getVtxosPage(address: string, page: PageRequest<Outpoint>): Promise<PageResult<ExtendedVirtualCoin, Outpoint>> {
+    return pageOutpoints(await this.storage.readVtxos(address), page);
   }
 
   async saveVtxos(address: string, vtxos: ExtendedVirtualCoin[]): Promise<void> {
-    const existing = await this.getVtxos(address);
+    const existing = await this.storage.readVtxos(address);
     await this.trackAddress(address);
     await this.storage.writeVtxos(
       address,
@@ -201,35 +284,43 @@ class LayerzWalletRepository {
     await this.storage.writeVtxos(address, []);
   }
 
-  async getUtxos(address: string): Promise<ExtendedCoin[]> {
-    return this.storage.readUtxos(address);
+  async getUtxosPage(address: string, page: PageRequest<Outpoint>): Promise<PageResult<ExtendedCoin, Outpoint>> {
+    return pageOutpoints(await this.storage.readUtxos(address), page);
   }
 
-  async saveUtxos(address: string, utxos: ExtendedCoin[]): Promise<void> {
-    const existing = await this.getUtxos(address);
-    await this.trackAddress(address);
-    await this.storage.writeUtxos(
-      address,
-      mergeByKey(existing, utxos, (item) => `${item.txid}:${item.vout}`)
-    );
+  async saveUtxos(address: string, utxos: ExtendedCoin[]): Promise<void>;
+  async saveUtxos(utxosByAddress: ReadonlyMap<string, ExtendedCoin[]>): Promise<void>;
+  async saveUtxos(addressOrBatch: string | ReadonlyMap<string, ExtendedCoin[]>, utxos: ExtendedCoin[] = []): Promise<void> {
+    for (const [address, list] of utxoEntries(addressOrBatch, utxos)) {
+      const existing = await this.storage.readUtxos(address);
+      await this.trackAddress(address);
+      await this.storage.writeUtxos(
+        address,
+        mergeByKey(existing, list, (item) => `${item.txid}:${item.vout}`)
+      );
+    }
   }
 
   async deleteUtxos(address: string): Promise<void> {
     await this.storage.writeUtxos(address, []);
   }
 
-  async getTransactionHistory(address: string): Promise<ArkTransaction[]> {
-    return this.storage.readTransactions(address);
+  async getTransactionHistoryPage(filter: TransactionHistoryPageFilter, page: PageRequest<TransactionHistoryPageCursor>): Promise<PageResult<ArkTransaction, TransactionHistoryPageCursor>> {
+    assertPageRequest(page);
+    assertHistoryPageFilter(filter);
+    const rows = (await this.storage.readTransactions(filter.address))
+      .filter((tx) => (filter.since === undefined || tx.createdAt >= filter.since) && (page.after === undefined || compareHistoryCursors({ createdAt: tx.createdAt, key: tx.key }, page.after) > 0))
+      .sort((a, b) => compareHistoryCursors({ createdAt: a.createdAt, key: a.key }, { createdAt: b.createdAt, key: b.key }))
+      .slice(0, page.limit + 1);
+    return pageResult(rows, page.limit, (tx) => ({ createdAt: tx.createdAt, key: tx.key }));
   }
 
   /**
    * Merge new transaction snapshots into persisted history for one address.
-   *
-   * the same Ark transaction may be seen many times as its status evolves.
-   * We want an upsert behavior, not duplicate entries in local history.
+   * The same Ark transaction may be seen many times as its status evolves.
    */
   async saveTransactions(address: string, txs: ArkTransaction[]): Promise<void> {
-    const existing = await this.getTransactionHistory(address);
+    const existing = await this.storage.readTransactions(address);
     await this.trackAddress(address);
     await this.storage.writeTransactions(
       address,
@@ -253,80 +344,89 @@ class LayerzWalletRepository {
     // no-op
   }
 
-  private async getTrackedAddresses(): Promise<string[]> {
-    return this.storage.readJson<string[]>('wallet:addresses', []);
+  private async trackAddress(address: string): Promise<void> {
+    await this.mutate(async () => {
+      const addresses = await this.storage.readTrackedAddresses();
+      if (addresses.includes(address)) return;
+      await this.storage.writeJson('wallet:addresses', [...addresses, address]);
+    });
   }
 
-  private async trackAddress(address: string): Promise<void> {
-    const addresses = await this.getTrackedAddresses();
-    if (addresses.includes(address)) return;
-    await this.storage.writeJson('wallet:addresses', [...addresses, address]);
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.addressListQueue.then(operation);
+    this.addressListQueue = run.catch(() => undefined);
+    return run;
   }
 }
 
+type StoredContract = Contract & { expiresAt?: number };
+
 /**
- * Small contract repository used by the Ark SDK contract manager.
- *
- * Ark Lightning and contract watching rely on persisted contracts, but this
- * project does not use the SDK's heavier storage backends here.
+ * ContractRepository v4 over Layerz's IStorage. Mirrors the SDK's InMemoryContractRepository:
+ * paged script-order reads, `watch`/`scope` filters (with their defaults), empty-array filters
+ * matching nothing, and serialized read-modify-write mutations.
  */
-class LayerzContractRepository {
-  readonly version = 1 as const;
+class LayerzContractRepository implements ContractRepository {
+  readonly version = 4 as const;
+
+  /** Mutations are read-modify-write over one JSON blob; serialize them so a concurrent save cannot drop another's row. */
+  private mutationQueue: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly storage: NamespacedStorage) {}
 
   async clear(): Promise<void> {
-    await this.writeContracts([]);
+    await this.mutate(async () => this.writeContracts([]));
   }
 
-  /**
-   * Return saved contracts with optional filtering.
-   *
-   * the SDK contract manager loads all contracts at startup and also asks for
-   * narrower subsets when updating or deleting specific entries.
-   */
-  async getContracts(filter?: ContractFilter): Promise<StoredContract[]> {
-    const contracts = await this.readContracts();
-    if (!filter) return contracts;
+  async getContractsPage(filter: ContractFilter | undefined, page: PageRequest): Promise<PageResult<Contract>> {
+    assertPageRequest(page);
+    if (contractFilterMatchesNothing(filter)) return { items: [] };
 
-    return contracts.filter((contract) => {
-      return this.matches(contract.script, filter.script) && this.matches(contract.state, filter.state) && this.matches(contract.type, filter.type);
+    const contracts = await this.readContracts();
+    const rows = contracts
+      .filter((contract) => page.after === undefined || contract.script > page.after)
+      .filter(
+        (contract) =>
+          !filter ||
+          (matches(contract.script, filter.script) &&
+            matches(contract.state, filter.state) &&
+            matches(contract.type, filter.type) &&
+            matches(watchStateOf(contract), filter.watch) &&
+            matches(scopeOf(contract), filter.scope))
+      )
+      .sort((a, b) => (a.script < b.script ? -1 : a.script > b.script ? 1 : 0))
+      .slice(0, page.limit + 1);
+    return pageResult(rows, page.limit, (contract) => contract.script);
+  }
+
+  /** Upsert a contract using its script as the stable identifier. */
+  async saveContract(contract: Contract): Promise<void> {
+    await this.mutate(async () => {
+      const contracts = await this.readContracts();
+      const nextContracts = contracts.filter((existingContract) => existingContract.script !== contract.script);
+      nextContracts.push(contract as StoredContract);
+      await this.writeContracts(nextContracts);
     });
   }
 
-  /**
-   * Upsert a contract using its script as the stable identifier.
-   *
-   * scripts uniquely identify contracts in the SDK, so updates need to replace
-   * by script rather than creating multiple copies of the same contract.
-   */
-  async saveContract(contract: StoredContract): Promise<void> {
-    const contracts = await this.readContracts();
-    const nextContracts = contracts.filter((existingContract) => existingContract.script !== contract.script);
-    nextContracts.push(contract);
-    await this.writeContracts(nextContracts);
-  }
-
   async deleteContract(script: string): Promise<void> {
-    const contracts = await this.readContracts();
-    await this.writeContracts(contracts.filter((contract) => contract.script !== script));
+    await this.mutate(async () => {
+      const contracts = await this.readContracts();
+      await this.writeContracts(contracts.filter((contract) => contract.script !== script));
+    });
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
     // no-op
   }
 
-  private matches<T>(value: T, criterion?: T | T[]): boolean {
-    if (criterion === undefined) return true;
-    return Array.isArray(criterion) ? criterion.includes(value) : value === criterion;
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.mutationQueue.then(operation);
+    this.mutationQueue = run.catch(() => undefined);
+    return run;
   }
 
-  /**
-   * Read all persisted contracts and keep only structurally valid entries.
-   *
-   * if cached storage contains junk, we prefer to skip it and let the wallet
-   * rebuild useful state rather than fail during startup.
-   */
+  /** Read all persisted contracts and keep only structurally valid entries. */
   private async readContracts(): Promise<StoredContract[]> {
     const parsed = await this.storage.readJson<StoredContract[]>('contracts', []);
     return parsed.filter(
@@ -347,19 +447,23 @@ class LayerzContractRepository {
 
 export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLightningWallet, InterfaceAccountBasedWallet, InterfaceCanHaveTokens {
   private _wallet: Wallet | undefined = undefined;
-  private _arkServerUrl: string = 'https://mutinynet.arkade.sh';
+  private _arkadeNetwork: ArkadeNetwork = NETWORK_ARK_MUTINYNET;
   protected _accountNumber: number = 0;
-  private _manager: VtxoManager | undefined = undefined;
   private _arkTokenBalances: CachedTokenInfo[] = [];
   _lastTokensFetch: number = 0;
+
+  private get _arkServerUrl(): string {
+    return ARKADE_NETWORK_CONFIG[this._arkadeNetwork].serverUrl;
+  }
 
   setAccountNumber(value: number) {
     this._accountNumber = value;
   }
 
-  setArkServerUrl(url: string) {
+  /** Server endpoints derive from ARKADE_NETWORK_CONFIG; no URL sniffing anywhere else. */
+  setArkadeNetwork(network: ArkadeNetwork) {
     assert(!this._wallet, 'Wallet already initialized');
-    this._arkServerUrl = url;
+    this._arkadeNetwork = network;
   }
 
   _getIdentity() {
@@ -380,10 +484,17 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
   }
 
   async init(layerzStorage: IStorage) {
+    // A re-init (account switch) must stop the previous SDK instance's settle poll and watchers.
+    await this.dispose();
+
     const identity = this._getIdentity();
     const storage = new NamespacedStorage(layerzStorage, this._arkServerUrl, this._accountNumber);
     const walletRepository = new LayerzWalletRepository(storage);
     const contractRepository = new LayerzContractRepository(storage);
+
+    // Wipe the legacy VTXO cache BEFORE the SDK boots: migrateLegacyUtxos needs the old
+    // UTXO rows, and copies them into VTXO rows during Wallet.create.
+    const needsUpgrade = await this._prepareSdk05Upgrade(storage);
 
     const wallet = await Wallet.create({
       identity,
@@ -391,131 +502,103 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
         walletRepository,
         contractRepository,
       },
-      arkProvider: new ExpoArkProvider(this._arkServerUrl),
+      operatorProvider: new ExpoOperatorProvider(this._arkServerUrl),
       indexerProvider: new ExpoIndexerProvider(this._arkServerUrl),
     });
     this._wallet = wallet;
 
-    this._manager = await wallet.getVtxoManager();
+    if (needsUpgrade) {
+      try {
+        // Force a full re-bootstrap now that the 0.4 coin cache is gone; the flag is only
+        // written after the cursor has actually been cleared.
+        await wallet.clearSyncCursor();
+        await storage.writeJson(SDK05_UPGRADE_FLAG, true);
+      } catch (error) {
+        globalThis.handleError?.(error, 'ark-wallet.ts');
+        console.log('ARK 0.5 upgrade error:', error);
+      }
+    }
 
-    await this._runOneTimeVtxoRecovery(storage);
-    await this._runDeprecatedSignerMigration();
+    await this._bootstrapWalletState(storage);
   }
 
   /**
-   * Discover VTXOs under rotated server signers and migrate them to the
-   * current signer before the operator cutoff closes cooperative spending.
+   * One-time 0.4 → 0.5 coin-cache upgrade. Legacy `virtualStatus` rows read back as
+   * "not swept", so drop them and let the SDK re-fetch canonical facts from the indexer.
+   * Only VTXO buckets are cleared; the UTXO rows are left for `migrateLegacyUtxos`.
    */
-  private async _runDeprecatedSignerMigration(): Promise<void> {
-    assert(this._wallet, 'Ark wallet not initialized');
-    assert(this._manager, 'VtxoManager not initialized');
+  private async _prepareSdk05Upgrade(storage: NamespacedStorage): Promise<boolean> {
+    try {
+      if (await storage.readJson<boolean>(SDK05_UPGRADE_FLAG, false)) return false;
+      const addresses = await storage.readTrackedAddresses();
+      if (addresses.length > 0) await storage.clearVtxoCacheForAddresses(addresses);
+      return true;
+    } catch (error) {
+      globalThis.handleError?.(error, 'ark-wallet.ts');
+      console.log('ARK 0.5 cache wipe error:', error);
+      return false;
+    }
+  }
 
+  /**
+   * restore() is a full indexer re-bootstrap, so it runs once per namespace: BOOTSTRAP_FLAG
+   * is written only after it succeeds, and a failed restore is retried on the next boot.
+   */
+  private async _bootstrapWalletState(storage: NamespacedStorage): Promise<void> {
+    try {
+      if (!(await storage.readJson<boolean>(BOOTSTRAP_FLAG, false)) && (await this._restoreWallet())) {
+        await storage.writeJson(BOOTSTRAP_FLAG, true);
+      }
+    } catch (error) {
+      globalThis.handleError?.(error, 'ark-wallet.ts');
+      console.log('ARK bootstrap error:', error);
+    }
+  }
+
+  private async _restoreWallet(): Promise<boolean> {
+    assert(this._wallet, 'Ark wallet not initialized');
     try {
       await this._wallet.restore();
-      const managerWithMigration = this._manager as typeof this._manager & {
-        migrateDeprecatedSignerVtxos?: () => Promise<{ rotated?: boolean; vtxos?: { txid?: string }; boarding?: { txid?: string } }>;
-      };
-      const migrateDeprecatedSignerVtxos = managerWithMigration.migrateDeprecatedSignerVtxos;
-      if (typeof migrateDeprecatedSignerVtxos !== 'function') {
-        return;
-      }
-
-      const report = await migrateDeprecatedSignerVtxos();
-      if (report.rotated || report.vtxos?.txid || report.boarding?.txid) {
-        console.log('ARK deprecated-signer migration:', report);
-      }
+      return true;
     } catch (error) {
       globalThis.handleError?.(error, 'ark-wallet.ts');
-      console.log('ARK deprecated-signer migration error:', error);
-    }
-
-    // Runs regardless of migration success: a failed/partial migration is exactly
-    // when the wallet is most likely to still hold funds under a rotated signer.
-    await this._resyncIfDeprecatedSignerContracts();
-  }
-
-  /** Drop the incremental sync cursor when this wallet still has active contracts under a deprecated server signer. */
-  private async _resyncIfDeprecatedSignerContracts(): Promise<void> {
-    assert(this._wallet, 'Ark wallet not initialized');
-
-    try {
-      const info = await this._wallet.arkProvider.getInfo();
-      if (!info.deprecatedSigners?.length) return;
-
-      const normalizeKey = (pubkey: string) => {
-        const hex = pubkey.toLowerCase();
-        return hex.length === 66 ? hex.slice(2) : hex;
-      };
-
-      const deprecatedKeys = new Set(info.deprecatedSigners.map((s) => normalizeKey(s.pubkey)));
-
-      // Only active contracts can still hold spendable funds; inactive/completed
-      // ones lingering in storage must not force a re-bootstrap on every init.
-      const contracts = await (await this._wallet.getContractManager()).getContracts({ state: 'active' });
-      const hasDeprecatedContract = contracts.some((c) => {
-        const pk = c.params?.serverPubKey;
-        return typeof pk === 'string' && deprecatedKeys.has(normalizeKey(pk));
-      });
-
-      if (hasDeprecatedContract) {
-        await this._wallet.clearSyncCursor();
-      }
-    } catch (error) {
-      globalThis.handleError?.(error, 'ark-wallet.ts');
-      console.log('ARK deprecated-signer resync check error:', error);
+      console.log('ARK restore error:', error);
+      return false;
     }
   }
 
   /**
-   * One-time recovery for wallets whose local VTXO cache was corrupted by older
-   * code. Clears the SDK sync cursor so the next balance/history fetch
-   * re-bootstraps from the indexer and re-persists with the corrected codec.
+   * Stop the SDK's background settle poll and watchers; safe to call before init() or
+   * repeatedly. SparkWallet/StacksWallet inherit this but never set `_wallet`, so it is a
+   * no-op for them (they override init()).
    */
-  private async _runOneTimeVtxoRecovery(storage: NamespacedStorage): Promise<void> {
-    const RECOVERY_FLAG = 'recovery:vtxoStorageV1';
-
+  async dispose() {
+    const wallet = this._wallet;
+    this._wallet = undefined;
+    if (!wallet) return;
     try {
-      if (await storage.readJson<boolean>(RECOVERY_FLAG, false)) return;
-
-      const addresses = await storage.readJson<string[]>('wallet:addresses', []);
-      if (addresses.length > 0) {
-        await storage.clearCoinCacheForAddresses(addresses);
-      }
-      await this._wallet?.clearSyncCursor();
-      await storage.writeJson(RECOVERY_FLAG, true);
+      await wallet.dispose();
     } catch (error) {
       globalThis.handleError?.(error, 'ark-wallet.ts');
+      console.log('ARK dispose error:', error);
     }
   }
 
   async getOffchainBalance() {
     assert(this._wallet, 'Ark wallet not initialized');
-    assert(this._manager, 'this._manager is undefined');
-
-    // renew VTXO:
-    try {
-      const expiringVtxos = await this._manager.getExpiringVtxos();
-      if (expiringVtxos.length > 0) {
-        console.log(`Renewing ${expiringVtxos.length} expiring VTXOs...`);
-        const renewTxid = await this._manager.renewVtxos();
-        console.log('Renewal transaction:', renewTxid);
-      }
-    } catch (error) {
-      globalThis.handleError?.(error, 'ark-wallet.ts');
-      console.log('ARK Error renewing VTXOs:', error);
-    }
 
     const balance = await this._wallet.getBalance();
     await this._populateArkTokenCacheFromWalletBalance(balance);
     this._lastBalanceFetch = Date.now();
-    return balance.available;
+    // decision 6: spendable offchain + recoverable. Boarding is excluded so a settling
+    // refill is never double counted while the UTXO and the new VTXO both exist.
+    return balance.available + balance.recoverable;
   }
 
-  /** Force a full VTXO re-sync from the Ark indexer on the next balance fetch. */
+  /** Full re-sync from the indexer now. */
   async resyncFromIndexer() {
     assert(this._wallet, 'Ark wallet not initialized');
-    await this._wallet.clearSyncCursor();
-    // the next balance fetch performs the full re-bootstrap and re-caches everything
+    await this._wallet.restore();
     return this.getOffchainBalance();
   }
 
@@ -632,7 +715,7 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
       }
 
       commonTransactions.push({
-        network: this._arkServerUrl.includes('mutiny') ? NETWORK_ARK_MUTINYNET : NETWORK_ARK, // hacky
+        network: this._arkadeNetwork,
         txid: transaction.key.arkTxid,
         timestamp,
         direction: transaction.type === TxType.TxSent ? 'send' : 'receive',
@@ -694,7 +777,7 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
     if (!BlueElectrum.mainConnected) await BlueElectrum.connectMain();
 
     const swaps: CommonSwap[] = [];
-    const network = this._arkServerUrl.includes('mutinynet') ? NETWORK_ARK_MUTINYNET : NETWORK_ARK;
+    const network = this._arkadeNetwork;
     const transactions = await this._wallet.getTransactionHistory();
 
     // unclaimed swaps
@@ -704,7 +787,7 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
       const txDetails = txs1[tx.key.boardingTxid];
       const timestamp = tx.createdAt || new Date().getTime();
       const confirmations = txDetails.confirmations ?? 0;
-      const claimable = confirmations >= 1; // can be claimed once it's unconfirmed
+      const claimable = confirmations >= 1; // claimable once the deposit confirms
       return {
         network,
         id: tx.key.boardingTxid,
@@ -749,8 +832,18 @@ export class ArkWallet extends AbstractHDElectrumWallet implements InterfaceLigh
     if (!this._wallet) throw new Error('Ark wallet not initialized');
 
     const boardingUtxos = (await this._wallet.getBoardingUtxos()).filter((utxo) => utxo.txid === txid);
-    const { fees } = await this._wallet.arkProvider.getInfo();
+    if (boardingUtxos.length === 0) {
+      // The SDK's VtxoManager auto-settles boarding UTXOs in the background. If it won the
+      // race with this manual claim, report the settled deposit instead of asking
+      // Ramps.onboard() to settle an empty input set (which would fail on fees >= value).
+      // When the deposit is merely not yet visible to the indexer, neither branch fires and
+      // the caller sees a retryable message rather than an SDK internals error.
+      const settled = await this.getSettledBoardingAmount(txid);
+      if (settled) return settled;
+      throw new Error('Boarding deposit is not claimable right now: it may already have been settled automatically, or the indexer has not caught up yet. Try again shortly.');
+    }
 
+    const { fees } = await this._wallet.arkProvider.getInfo();
     const resultTxid = await new Ramps(this._wallet).onboard(fees, boardingUtxos);
 
     // Look up the post-fee credited amount from the resulting VTXO

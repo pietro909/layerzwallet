@@ -2,16 +2,16 @@
 // This replaces expo-router/entry to include necessary polyfills
 
 import 'react-native-get-random-values';
+// SDK 0.5 signs through @noble/secp256k1's async hashes, which need crypto.subtle.
+// Must be installed before any module that imports @arkade-os/sdk is evaluated.
+import './src/modules/crypto-subtle-polyfill';
 import { LogBox } from 'react-native';
 
 // A failed Lightning history fetch must not cover the receive sheet during dev/Maestro.
 LogBox.ignoreLogs(['tx fetch error']);
 
 /** Hermes exposes getRandomValues but not randomUUID; MCP SDK + others expect it */
-if (
-  typeof globalThis.crypto?.getRandomValues === 'function' &&
-  typeof globalThis.crypto?.randomUUID !== 'function'
-) {
+if (typeof globalThis.crypto?.getRandomValues === 'function' && typeof globalThis.crypto?.randomUUID !== 'function') {
   globalThis.crypto.randomUUID = function randomUUID() {
     const bytes = new Uint8Array(16);
     globalThis.crypto.getRandomValues(bytes);
